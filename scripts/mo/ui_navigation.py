@@ -7,11 +7,13 @@ _DETAILS = 'details'
 _EDIT = 'edit'
 _REMOVE = 'remove'
 _DOWNLOAD = 'download'
+_IMPORT_EXPORT = 'import_export'
+_DEBUG = 'debug'
 
 _NODE_SCREEN = 'screen'
 _NODE_RECORD_ID = 'record_id'
+_NODE_PREFILLED_JSON = 'prefilled_json'
 _NODE_GROUP = 'group'
-_NODE_RECORD_IDS = 'record_ids'
 
 
 def navigate_home() -> str:
@@ -73,10 +75,13 @@ def get_nav_state(json_nav) -> dict:
         'is_edit_visible': False,
         'is_remove_visible': False,
         'is_download_visible': False,
+        'is_import_export_visible': False,
+        'is_debug_visible': False,
         'details_record_id': '',
         'edit_data': {},
         'remove_record_id': '',
-        'download_info': ''
+        'download_info': '',
+        'filter_state': {}
     }
 
     if nav_dict.get(_NODE_SCREEN) is None:
@@ -89,8 +94,10 @@ def get_nav_state(json_nav) -> dict:
         elif nav_dict[_NODE_SCREEN] == _EDIT:
             state['is_edit_visible'] = True
             edit_data = {'token': generate_ui_token()}
-            if nav_dict.get('record_id') is not None:
-                edit_data['record_id'] = nav_dict[_NODE_RECORD_ID]
+            if nav_dict.get(_NODE_RECORD_ID) is not None:
+                edit_data[_NODE_RECORD_ID] = nav_dict[_NODE_RECORD_ID]
+            if nav_dict.get(_NODE_PREFILLED_JSON) is not None:
+                edit_data[_NODE_PREFILLED_JSON] = nav_dict[_NODE_PREFILLED_JSON]
             state['edit_data'] = json.dumps(edit_data)
 
         elif nav_dict[_NODE_SCREEN] == _REMOVE:
@@ -107,10 +114,16 @@ def get_nav_state(json_nav) -> dict:
             if nav_dict.get(_NODE_GROUP) is not None:
                 download_dict[_NODE_GROUP] = nav_dict[_NODE_GROUP]
 
-            if nav_dict.get(_NODE_RECORD_IDS) is not None:
-                download_dict[_NODE_RECORD_IDS] = nav_dict[_NODE_RECORD_IDS]
+            if nav_dict.get('filter_state') is not None:
+                download_dict['filter_state'] = nav_dict['filter_state']
 
             state['download_info'] = json.dumps(download_dict)
+
+        elif nav_dict[_NODE_SCREEN] == _IMPORT_EXPORT:
+            state['is_import_export_visible'] = True
+            state['filter_state'] = nav_dict['filter_state']
+        elif nav_dict[_NODE_SCREEN] == _DEBUG:
+            state['is_debug_visible'] = True
 
     return state
 
@@ -131,12 +144,12 @@ def get_download_group(data):
         return download_dict[_NODE_GROUP]
 
 
-def get_download_record_ids(data):
+def get_download_filter_state(data):
     download_dict = json.loads(data)
-    if download_dict.get(_NODE_RECORD_IDS) is None:
+    if download_dict.get('filter_state') is None:
         return None
     else:
-        return download_dict[_NODE_RECORD_IDS]
+        return download_dict['filter_state']
 
 
 def generate_ui_token() -> str:

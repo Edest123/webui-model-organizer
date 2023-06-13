@@ -1,15 +1,16 @@
 import json
 import os.path
-import re
 import time
 
 import gradio as gr
 
 import scripts.mo.ui_styled_html as styled
+from scripts.mo.data.storage import map_dict_to_record
 from scripts.mo.dl.download_manager import DownloadManager, calculate_sha256, calculate_md5
 from scripts.mo.environment import env, logger
 from scripts.mo.models import Record, ModelType
 from scripts.mo.ui_navigation import generate_ui_token
+from scripts.mo.utils import is_blank, is_valid_filename, is_valid_url, get_model_files_in_dir
 
 
 def is_directory_path_valid(path):
@@ -24,24 +25,10 @@ def is_directory_path_valid(path):
             return False
 
 
-def is_valid_url(url: str) -> bool:
-    pattern = re.compile(r'^https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+')
-    return bool(pattern.match(url))
-
-
-def is_valid_filename(filename: str) -> bool:
-    pattern = re.compile(r'^[^\x00-\x1f\\/?*:|"<>]+$')
-    return bool(pattern.match(filename))
-
-
-def is_blank(s):
-    return len(s.strip()) == 0
-
-
 def _on_description_output_changed(record_data, name: str, model_type_value: str, download_url: str, url: str,
                                    download_path: str, download_filename: str, download_subdir: str, preview_url: str,
                                    description_output: str, positive_prompts: str, negative_prompts: str,
-                                   groups: list[str], back_token: str, bind_existing: str):
+                                   groups, back_token: str, bind_existing: str, sha256_state):
     errors = []
     if is_blank(name):
         errors.append('Name field is empty.')
@@ -52,12 +39,11 @@ def _on_description_output_changed(record_data, name: str, model_type_value: str
         errors.append('Model type not selected.')
         model_type = None
 
-    if is_blank(download_url):
-        errors.append('Download field is empty.')
-    elif not is_valid_url(download_url):
-        errors.append('Download URL is incorrect')
-    elif not DownloadManager.instance().check_url_can_be_handled(download_url):
-        errors.append(f"Model can't be downloaded from URL: {download_url}")
+    if not is_blank(download_url):
+        if not is_valid_url(download_url):
+            errors.append('Download URL is incorrect')
+        elif not DownloadManager.instance().check_url_can_be_handled(download_url):
+            errors.append(f"Model can't be downloaded from URL: {download_url}")
 
     if not is_blank(url) and not is_valid_url(url):
         errors.append('Model URL is incorrect.')
@@ -115,7 +101,8 @@ def _on_description_output_changed(record_data, name: str, model_type_value: str
                 sha256_hash = old_record.sha256_hash
                 md5_hash = old_record.md5_hash
                 location = old_record.location
-
+        elif old_record is None and sha256_state is not None:
+            sha256_hash = sha256_state
         elif bind_existing:
             location = os.path.join(env.get_model_path(model_type), download_subdir, download_filename)
             sha256_hash = calculate_sha256(location)
@@ -154,33 +141,22 @@ def _on_description_output_changed(record_data, name: str, model_type_value: str
         ]
 
 
-def _get_files_for_dir(lookup_dir: str) -> list[str]:
-    root_dir = os.path.join(lookup_dir, '')
-    extensions = ('.bin', '.ckpt', '.safetensors', '.pt', '.zip')
-    result = []
-
-    if os.path.isdir(root_dir):
-        for subdir, dirs, files in os.walk(root_dir):
-            for file in files:
-                ext = os.path.splitext(file)[-1].lower()
-                if ext in extensions:
-                    filepath = os.path.join(subdir, file)
-                    result.append(filepath)
-    return result
-
-
 def _on_id_changed(record_data):
     record_data = json.loads(record_data)
+    prefilled = None
     if record_data.get('record_id') is not None and record_data['record_id']:
         record = env.storage.get_record_by_id(record_data['record_id'])
+    elif record_data.get('prefilled_json') is not None and record_data['prefilled_json']:
+        prefilled = json.loads(record_data['prefilled_json'])
+        record = map_dict_to_record(prefilled.get('id_'), prefilled)
     else:
         record = None
 
-    title = '## Add model' if record is None else '## Edit model'
+    title = '## Add model' if record is None or prefilled is not None else '## Edit model'
     name = '' if record is None else record.name
     model_type = '' if record is None else record.model_type.value
 
-    if record is None:
+    if record is None or not record.download_url:
         download_url = gr.Textbox.update(
             value='',
             label='Download URL:'
@@ -201,6 +177,7 @@ def _on_id_changed(record_data):
     positive_prompts = '' if record is None else record.positive_prompts
     negative_prompts = '' if record is None else record.negative_prompts
     record_groups = [] if record is None else record.groups
+    sha256 = None if record is None or not bool(record.sha256_hash) else record.sha256_hash
 
     available_groups = env.storage.get_available_groups()
     logger.info('Groups loaded: %s', available_groups)
@@ -221,7 +198,7 @@ def _on_id_changed(record_data):
 
     return [title, name, model_type, download_url, preview_url, url, download_path, download_filename, download_subdir,
             description, positive_prompts, negative_prompts, groups, available_groups, gr.HTML.update(visible=False),
-            bind_with_existing, location_state]
+            bind_with_existing, location_state, sha256]
 
 
 def _get_bind_existing_update(model_type_value, location_state):
@@ -244,7 +221,7 @@ def _get_bind_existing_update(model_type_value, location_state):
     if location_state is None or not location_state or not os.path.exists(location_state):
         lookup_dir = os.path.join(env.get_model_path(model_type), '')
 
-        files_found = _get_files_for_dir(lookup_dir)
+        files_found = get_model_files_in_dir(lookup_dir)
         files_exclude = env.storage.get_all_records_locations()
         files_unbounded = [x for x in files_found if x not in files_exclude]
 
@@ -324,10 +301,8 @@ def edit_ui_block():
                                elem_classes='mo-alert-warning',
                                interactive=False,
                                visible=False)
-    theme_box = gr.Textbox(label='theme_box',
-                           elem_classes='mo-alert-warning',
-                           visible=False,
-                           value=env.theme())
+
+    sha256_preload_state = gr.State()
 
     title_widget = gr.Markdown()
     available_groups_state = gr.State()
@@ -349,7 +324,7 @@ def edit_ui_block():
             download_url_widget = gr.Textbox(label='Download URL:',
                                              value='',
                                              max_lines=1,
-                                             info='Link to the model file (Required)')
+                                             info='Link to the model file (Optional)')
             preview_url_widget = gr.Textbox(label='Preview image URL:',
                                             value='',
                                             max_lines=1,
@@ -423,7 +398,7 @@ def edit_ui_block():
                                            interactive=False,
                                            visible=False)
 
-    description_input_widget.change(fn=None, inputs=[description_input_widget, theme_box],
+    description_input_widget.change(fn=None, inputs=description_input_widget,
                                     _js='handleDescriptionEditorContentChange')
 
     description_output_widget.change(_on_description_output_changed,
@@ -432,7 +407,7 @@ def edit_ui_block():
                                              download_path_widget, download_filename_widget, download_subdir_widget,
                                              preview_url_widget, description_output_widget, positive_prompts_widget,
                                              negative_prompts_widget, groups_widget, edit_back_box,
-                                             bind_with_existing_widget],
+                                             bind_with_existing_widget, sha256_preload_state],
                                      outputs=[error_widget, edit_back_box])
 
     edit_id_box.change(_on_id_changed,
@@ -441,7 +416,7 @@ def edit_ui_block():
                                 preview_url_widget, url_widget, download_path_widget, download_filename_widget,
                                 download_subdir_widget, description_input_widget, positive_prompts_widget,
                                 negative_prompts_widget, groups_widget, available_groups_state, error_widget,
-                                bind_with_existing_widget, location_state]
+                                bind_with_existing_widget, location_state, sha256_preload_state]
                        )
 
     save_widget.click(fn=None, _js='handleRecordSave')

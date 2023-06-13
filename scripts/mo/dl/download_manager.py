@@ -2,13 +2,15 @@ import os
 import tempfile
 import threading
 from copy import deepcopy
+from typing import List
 from urllib.parse import urlparse
 
 from scripts.mo.dl.downloader import Downloader
 from scripts.mo.dl.gdrive_downloader import GDriveDownloader
 from scripts.mo.dl.http_downloader import HttpDownloader
-from scripts.mo.environment import env, logger, calculate_md5, calculate_sha256
+from scripts.mo.environment import env, logger, calculate_md5
 from scripts.mo.models import Record
+from scripts.mo.utils import resize_preview_image, get_model_filename_without_extension, calculate_sha256
 
 GENERAL_STATUS_IN_PROGRESS = 'In Progress'
 GENERAL_STATUS_CANCELLED = 'Cancelled'
@@ -65,17 +67,6 @@ def _get_filename(downloader: Downloader, record: Record) -> str:
     return filename
 
 
-def _get_preview_extension(url):
-    extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp']
-    for ext in extensions:
-        if url.endswith(ext):
-            # webui doesn't look for previews with .jpeg extension
-            if ext == '.jpeg':
-                return ".jpg"
-            return ext
-    return 'png'
-
-
 def _change_file_extension(filename, new_extension):
     base, ext = os.path.splitext(filename)
     if not ext:
@@ -85,11 +76,6 @@ def _change_file_extension(filename, new_extension):
         # If the filename has an extension, replace it with the new one
         new_filename = base + '.' + new_extension.lstrip('.')
     return new_filename
-
-
-def _get_preview_filename(url, filename):
-    extension = _get_preview_extension(url)
-    return _change_file_extension(filename, extension)
 
 
 class DownloadManager:
@@ -105,7 +91,7 @@ class DownloadManager:
         self._thread = None
         self._temp_files = set()
 
-        self._downloaders: list[Downloader] = [
+        self._downloaders: List = [
             GDriveDownloader(),
             HttpDownloader()  # Should always be the last one to give a chance for other http schemas
         ]
@@ -127,7 +113,7 @@ class DownloadManager:
     def get_latest_state(self) -> dict:
         return self._latest_state
 
-    def start_download(self, records: list[Record]):
+    def start_download(self, records: List):
         if not self._stop_event.is_set():
             logger.warning('Download already running')
             return
@@ -180,7 +166,7 @@ class DownloadManager:
         self._state = new_general_state
         self._latest_state = latest_state
 
-    def _download_loop(self, records: list[Record]):
+    def _download_loop(self, records: List):
         try:
             self._clear_temp_files()
             for record in records:
@@ -277,7 +263,7 @@ class DownloadManager:
 
         if record.preview_url and env.download_preview():
             try:
-                preview_filename = _get_preview_filename(record.preview_url, filename)
+                preview_filename = get_model_filename_without_extension(filename) + '.jpg'
                 logger.debug('Preview image name: %s', preview_filename)
                 yield {'preview_filename': preview_filename}
 
@@ -294,21 +280,17 @@ class DownloadManager:
 
                 preview_downloader = self._get_downloader(record.preview_url)
 
-                with tempfile.NamedTemporaryFile(delete=False, dir=destination_dir) as temp:
+                with tempfile.NamedTemporaryFile() as temp:
                     logger.debug('Downloading preview into tmp file: %s', temp.name)
-                    self._temp_files.add(temp)
                     for upd in preview_downloader.download(record.preview_url, temp.name, preview_filename,
                                                            self._stop_event):
                         yield {'preview_dl': upd}
 
-                    temp.close()
-
                     if self._stop_event.is_set():
                         return
 
-                    os.rename(temp.name, preview_destination_file_path)
-                    self._temp_files.remove(temp)
-                    os.chmod(destination_file_path, 0o644)
+                    resize_preview_image(temp.name, preview_destination_file_path)
+
                     logger.debug('Move from tmp file to preview destination: %s', preview_destination_file_path)
             except Exception as ex:
                 yield {'exception_preview': ex}

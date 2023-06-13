@@ -1,73 +1,26 @@
 import json
-import os.path
-from datetime import datetime
 
 import gradio as gr
 
-import scripts.mo.ui_navigation as nav
 import scripts.mo.ui_styled_html as styled
-from scripts.mo.data.storage import map_record_to_dict, map_dict_to_record
+from scripts.mo.data.record_utils import load_records_and_filter
 from scripts.mo.environment import env, LAYOUT_CARDS
-from scripts.mo.models import Record, ModelType, ModelSort
-
-
-def _sort_records(records: list[Record], sort_order: ModelSort, sort_downloaded_first: bool) -> list[Record]:
-    if sort_downloaded_first:
-        if sort_order == ModelSort.TIME_ADDED_ASC:
-            sorted_records = sorted(records,
-                                    key=lambda r: (not (bool(r.location) and os.path.exists(r.location)), r.created_at))
-        elif sort_order == ModelSort.TIME_ADDED_DESC:
-            sorted_records = sorted(records,
-                                    key=lambda r: (bool(r.location) and os.path.exists(r.location), r.created_at),
-                                    reverse=True)
-        elif sort_order == ModelSort.NAME_ASC:
-            sorted_records = sorted(records,
-                                    key=lambda r: (not (bool(r.location) and os.path.exists(r.location)), r.name))
-        elif sort_order == ModelSort.NAME_DESC:
-            sorted_records = sorted(records, key=lambda r: (bool(r.location) and os.path.exists(r.location), r.name),
-                                    reverse=True)
-        else:
-            raise ValueError(f'An unhandled sort_order value: {sort_order.value}')
-    else:
-        if sort_order == ModelSort.TIME_ADDED_ASC:
-            sorted_records = sorted(records, key=lambda record: record.created_at)
-        elif sort_order == ModelSort.TIME_ADDED_DESC:
-            sorted_records = sorted(records, key=lambda record: record.created_at, reverse=True)
-        elif sort_order == ModelSort.NAME_ASC:
-            sorted_records = sorted(records, key=lambda record: record.name)
-        elif sort_order == ModelSort.NAME_DESC:
-            sorted_records = sorted(records, key=lambda record: record.name, reverse=True)
-        else:
-            raise ValueError(f'An unhandled sort_order value: {sort_order.value}')
-    return sorted_records
+from scripts.mo.models import ModelType, ModelSort
 
 
 def _prepare_data(state_json: str):
     state = json.loads(state_json)
 
-    records = env.storage.query_records(
-        name_query=state['query'],
-        groups=state['groups'],
-        model_types=state['model_types'],
-        show_downloaded=state['show_downloaded'],
-        show_not_downloaded=state['show_not_downloaded']
-    )
-    records = _sort_records(
-        records=records,
-        sort_order=ModelSort.by_value(state['sort_order']),
-        sort_downloaded_first=state['sort_downloaded_first']
-    )
+    records = load_records_and_filter(state, True)
 
     if env.layout() == LAYOUT_CARDS:
         html = styled.records_cards(records)
     else:
         html = styled.records_table(records)
 
-    record_ids = list(map(lambda r: r.id_, records))
     return [
         html,
-        json.dumps(json.dumps(record_ids)),
-        gr.Button.update(visible=len(record_ids) > 0),
+        gr.Button.update(visible=len(records) > 0),
         gr.Dropdown.update(value=state['groups'], choices=_get_available_groups())
     ]
 
@@ -124,53 +77,10 @@ def _on_show_not_downloaded_changed(show_not_downloaded, state_json):
     return json.dumps(state)
 
 
-def _on_export_click(record_ids):
-    ids = json.loads(json.loads(record_ids))
-
-    if len(ids) == 0:
-        return gr.File.update(visible=False)
-
-    records_dict_list = []
-    for id_ in ids:
-        record = env.storage.get_record_by_id(id_)
-        records_dict_list.append(map_record_to_dict(record))
-
-    if len(records_dict_list) > 0:
-        export_dir = os.path.join(env.script_dir, 'export')
-        if not os.path.isdir(export_dir):
-            os.mkdir(export_dir)
-
-        filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        path = os.path.join(export_dir, filename)
-        with open(path, 'w') as f:
-            json.dump(records_dict_list, f)
-
-        return gr.File.update(value=path, label='Exported, Click "Download"', visible=True)
-    else:
-        return gr.File.update(visible=False)
-
-
-def _on_import_file_change(import_file):
-    with open(import_file.name, 'r') as f:
-        records_dict_list = json.load(f)
-
-    if len(records_dict_list) == 0:
-        return gr.HTML.update('Nothing to import')
-    else:
-        records_imported = []
-        for record_dict in records_dict_list:
-            record = map_dict_to_record('', record_dict)
-            env.storage.add_record(record)
-            records_imported.append(record.name)
-
-        output = f'Imported records: ({len(records_imported)})'
-        for name in records_imported:
-            output += '<br>'
-            output += name
-        return [
-            gr.HTML.update(value=output),
-            nav.generate_ui_token()
-        ]
+def _on_show_local_files_changed(show_not_downloaded, state_json):
+    state = json.loads(state_json)
+    state['show_local_files'] = show_not_downloaded
+    return json.dumps(state)
 
 
 def home_ui_block():
@@ -192,11 +102,11 @@ def home_ui_block():
         'groups': [],
         'show_downloaded': True,
         'show_not_downloaded': True,
+        'show_local_files': True,
         'sort_order': sort_order,
         'sort_downloaded_first': sort_downloaded_first
     }
     initial_state_json = json.dumps(initial_state)
-    initial_html, initial_record_ids, download_all_update, _ = _prepare_data(initial_state_json)
 
     with gr.Blocks():
         refresh_box = gr.Textbox(label='refresh_box',
@@ -204,17 +114,28 @@ def home_ui_block():
                                  visible=False,
                                  interactive=False)
 
-        state_box = gr.Textbox(value=initial_state_json,
+        state_box = gr.Textbox(value='',
                                label='state_box',
                                elem_classes='mo-alert-warning',
+                               elem_id='mo-home-state-box',
                                visible=False,
                                interactive=False)
 
+        gr.Textbox(value=initial_state_json,
+                   label='initial_state_box',
+                   elem_classes='mo-alert-warning',
+                   elem_id='mo-initial-state-box',
+                   visible=False,
+                   interactive=False)
+
         with gr.Row():
             gr.Markdown('## Records list')
-            gr.Markdown('')
+            if not env.is_debug_mode_enabled():
+                gr.Markdown('')
+            debug_button = gr.Button('Debug', visible=env.is_debug_mode_enabled())
             reload_button = gr.Button('Reload')
-            download_all_button = gr.Button('Download All', visible=download_all_update['visible'])
+            download_all_button = gr.Button('Download All', visible=False)
+            import_export_button = gr.Button('Import/Export')
             add_button = gr.Button('Add')
 
         with gr.Accordion(label='Display options', open=False):
@@ -242,28 +163,21 @@ def home_ui_block():
                                                        value=initial_state['show_downloaded'])
                 show_not_downloaded_checkbox = gr.Checkbox(label='Show not downloaded',
                                                            value=initial_state['show_not_downloaded'])
+                show_local_files_checkbox = gr.Checkbox(label='Show local files',
+                                                        value=initial_state['show_local_files'])
 
-        html_content_widget = gr.HTML(initial_html)
-        record_ids_box = gr.Textbox(value=initial_record_ids,
-                                    label='record_ids_box',
-                                    elem_classes='mo-alert-warning',
-                                    visible=False,
-                                    interactive=False)
-
-        with gr.Accordion(label='Import/Export', open=False, visible=True):
-            import_file_widget = gr.File(label='Import .json file', file_types=['.json'])
-            import_result_widget = gr.HTML()
-            export_button = gr.Button(value='Export')
-            export_file_widget = gr.File(visible=False)
+        html_content_widget = gr.HTML()
 
         reload_button.click(_prepare_data, inputs=state_box,
-                            outputs=[html_content_widget, record_ids_box, download_all_button, groups_dropdown])
+                            outputs=[html_content_widget, download_all_button, groups_dropdown])
         refresh_box.change(_prepare_data, inputs=state_box,
-                           outputs=[html_content_widget, record_ids_box, download_all_button, groups_dropdown])
+                           outputs=[html_content_widget, download_all_button, groups_dropdown])
         state_box.change(_prepare_data, inputs=state_box,
-                         outputs=[html_content_widget, record_ids_box, download_all_button, groups_dropdown])
+                         outputs=[html_content_widget, download_all_button, groups_dropdown])
 
-        download_all_button.click(fn=None, inputs=record_ids_box, _js='navigateDownloadRecordList')
+        debug_button.click(fn=None, _js='navigateDebug')
+        download_all_button.click(fn=None, inputs=state_box, _js='navigateDownloadRecordList')
+        import_export_button.click(fn=None, inputs=state_box, _js='navigateImportExport')
         add_button.click(fn=None, _js='navigateAdd')
 
         sort_box.change(_on_sort_order_changed,
@@ -285,9 +199,8 @@ def home_ui_block():
         show_not_downloaded_checkbox.change(_on_show_not_downloaded_changed,
                                             inputs=[show_not_downloaded_checkbox, state_box],
                                             outputs=state_box)
-
-        import_file_widget.change(_on_import_file_change, inputs=import_file_widget,
-                                  outputs=[import_result_widget, refresh_box])
-        export_button.click(_on_export_click, inputs=record_ids_box, outputs=export_file_widget)
+        show_local_files_checkbox.change(_on_show_local_files_changed,
+                                         inputs=[show_local_files_checkbox, state_box],
+                                         outputs=state_box)
 
     return refresh_box
