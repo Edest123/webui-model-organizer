@@ -1,12 +1,15 @@
+import html
+import json
 import os
 from typing import List
 
 import scripts.mo.ui_format as ui_format
+from scripts.mo.data.storage import map_record_to_dict
 from scripts.mo.environment import env
 from scripts.mo.models import Record, ModelType
 
-_NO_PREVIEW_DARK = 'https://github.com/alexandersokol/sd-model-organizer/raw/master/pic/no-preview-dark.png'
-_NO_PREVIEW_LIGHT = 'https://github.com/alexandersokol/sd-model-organizer/raw/master/pic/no-preview-light.png'
+_NO_PREVIEW_DARK = 'file=extensions/sd-model-organizer/pic/no-preview-dark-blue.png'
+_NO_PREVIEW_LIGHT = 'file=extensions/sd-model-organizer/pic/no-preview-light.png'
 
 
 def alert_danger(value) -> str:
@@ -77,12 +80,12 @@ def _model_type_css_class(model_type: ModelType) -> str:
 
 def _no_preview_image_url() -> str:
     if env.theme() == 'dark':
-        return f'https://github.com/alexandersokol/sd-model-organizer/raw/develop/pic/no-preview-dark-blue.png'
+        return _NO_PREVIEW_DARK
     else:
-        return f'https://github.com/alexandersokol/sd-model-organizer/raw/master/pic/no-preview-light.png'
+        return _NO_PREVIEW_LIGHT
 
 
-def records_table(records: List[Record]) -> str:
+def records_table(records: List) -> str:
     table_html = '<div class="mo-container">'
     table_html += '<div class="mo-row mo-row-header">'
     table_html += '<div class="mo-col mo-col-preview"><span class="mo-text-header">Preview</span></div>'
@@ -92,7 +95,7 @@ def records_table(records: List[Record]) -> str:
     table_html += '<div class="mo-col mo-col-actions"><span class="mo-text-header">Actions</span></div>'
     table_html += '</div>'
     for record in records:
-        name = record.name
+        name = html.escape(record.name)
         type_ = record.model_type.value
         preview_url = record.preview_url
         description = _limit_description(record.description)
@@ -123,9 +126,12 @@ def records_table(records: List[Record]) -> str:
 
         # Add actions column
         table_html += '<div class="mo-col mo-col-actions ">'
-        table_html += '<button class="mo-btn mo-btn-primary" ' \
-                      f'onclick="navigateDownloadRecord(\'{record.id_}\')">Download</button>'
-        table_html += '<br>'
+
+        if record.is_download_possible():
+            table_html += '<button class="mo-btn mo-btn-primary" ' \
+                          f'onclick="navigateDownloadRecord(\'{record.id_}\')">Download</button>'
+            table_html += '<br>'
+
         table_html += '<button type="button" class="mo-btn mo-btn-warning" ' \
                       f'onclick="navigateEdit(\'{record.id_}\')">Edit</button>'
         table_html += '<br>'
@@ -155,16 +161,16 @@ def _create_content_link(link: str) -> str:
     return f'<a class="mo-nav-link" target="_blank" href="{link}">{link}</a>'
 
 
-def _create_groups(groups: list[str]) -> str:
+def _create_groups(groups: List) -> str:
     groups_html = ''
     for group in groups:
-        groups_html += f'<span class="mo-badge mo-badge-group" onclick="">{group}</span>'
+        groups_html += f'<span class="mo-badge mo-badge-group" onclick="">{html.escape(group)}</span>'
     return groups_html
 
 
 def _create_top_fields_dict(record: Record) -> dict:
     result = {
-        'Name': _create_content_text(record.name),
+        'Name': _create_content_text(html.escape(record.name)),
         'Type': _create_content_model_type(record.model_type)
     }
 
@@ -266,14 +272,14 @@ def _details_top(record: Record) -> str:
         if record.positive_prompts:
             content += '<div class="mo-details-sub-col mo-details-row-positive">'
             content += '<span class="mo-text-content mo-text-positive">'
-            content += record.positive_prompts
+            content += html.escape(record.positive_prompts)
             content += '</span>'
             content += '</div>'
 
         if record.negative_prompts:
             content += '<div class="mo-details-sub-col mo-details-row-negative">'
             content += '<span class="mo-text-content mo-text-negative">'
-            content += record.negative_prompts
+            content += html.escape(record.negative_prompts)
             content += '</span>'
             content += '</div>'
         content += '</div>'
@@ -294,15 +300,8 @@ def record_details(record: Record) -> str:
     return content
 
 
-def records_cards(records: List[Record]) -> str:
+def records_cards(records: List) -> str:
     content = '<div class="mo-card-grid">'
-    content += """
-    <script>
-    function handleRemoveClick(recordId) {
-    console.log('remove: ' + recordId)
-    }
-    </script>
-    """
 
     for record in records:
         content += '<div class="mo-card">'
@@ -310,7 +309,7 @@ def records_cards(records: List[Record]) -> str:
         content += f'<img src="{record.preview_url}" alt="Preview Image" ' \
                    f'onerror="this.onerror=null; this.src=\'{_no_preview_image_url()}\';"/>'
 
-        content += f'<div class="mo-card-blur-overlay-bottom">{_limit_card_name(record.name)}</div>'
+        content += f'<div class="mo-card-blur-overlay-bottom">{html.escape(_limit_card_name(record.name))}</div>'
 
         content += '<div class="mo-card-content-top">'
         content += f'<div class="mo-card-text-left"><span class="mo-badge {_model_type_css_class(record.model_type)}"' \
@@ -320,20 +319,36 @@ def records_cards(records: List[Record]) -> str:
         content += '<div class="mo-card-hover">'
         content += '<div class="mo-card-hover-buttons">'
 
-        content += '<button type="button" class="mo-btn mo-btn-success" '
+        if record.is_local_file_record():
 
-        content += '<button type="button" class="mo-btn mo-btn-success" ' \
-                   f'onclick="navigateDetails(\'{record.id_}\')">Details</button><br>'
+            temp_record = Record(
+                id_=record.id_,
+                location=record.location,
+                model_type=record.model_type,
+                name=record.name,
+                download_path=record.download_path,
+                download_filename=record.download_filename
+            )
+            json_record = html.escape(json.dumps(map_record_to_dict(temp_record)))
 
-        if not record.location or not os.path.exists(record.location):
-            content += '<button type="button" class="mo-btn mo-btn-primary" ' \
-                       f'onclick="navigateDownloadRecord(\'{record.id_}\')">Download</button><br>'
+            content += '<button type="button" class="mo-btn mo-btn-success" ' \
+                       f'onclick="navigateEditPrefilled(\'{json_record}\')">Add</button><br>'
 
-        content += '<button type="button" class="mo-btn mo-btn-warning" ' \
-                   f'onclick="navigateEdit(\'{record.id_}\')">Edit</button><br>'
+            content += '<button type="button" class="mo-btn mo-btn-danger" ' \
+                       f'onclick="navigateRemove(\'{record.location}\')">Remove</button><br>'
+        else:
+            content += '<button type="button" class="mo-btn mo-btn-success" ' \
+                       f'onclick="navigateDetails(\'{record.id_}\')">Details</button><br>'
 
-        content += '<button type="button" class="mo-btn mo-btn-danger" ' \
-                   f'onclick="navigateRemove(\'{record.id_}\')">Remove</button><br>'
+            if record.is_download_possible():
+                content += '<button type="button" class="mo-btn mo-btn-primary" ' \
+                           f'onclick="navigateDownloadRecord(\'{record.id_}\')">Download</button><br>'
+
+            content += '<button type="button" class="mo-btn mo-btn-warning" ' \
+                       f'onclick="navigateEdit(\'{record.id_}\')">Edit</button><br>'
+
+            content += '<button type="button" class="mo-btn mo-btn-danger" ' \
+                       f'onclick="navigateRemove(\'{record.id_}\')">Remove</button><br>'
 
         content += '</div>'
         content += '</div>'
@@ -346,7 +361,7 @@ def records_cards(records: List[Record]) -> str:
 
 def _downloads_header(record_id, title) -> str:
     content = '<div class="mo-downloads-header">'
-    content += f'<h2 style="margin: 0;" id="title-{record_id}">{title}</h2>'
+    content += f'<h2 style="margin: 0;" id="title-{record_id}">{html.escape(title)}</h2>'
     content += f'<p style="margin: 0; white-space: nowrap;" id="status-{record_id}">Pending</p>'
     content += '</div>'
     return content
@@ -381,7 +396,7 @@ def _download_progress_bar(record_id, is_preview: bool) -> str:
     return content
 
 
-def download_cards(records: list[Record], token) -> str:
+def download_cards(records: List, token) -> str:
     content = f'<div class="mo-downloads-container" token="{token}">'
     counter = 0
     for record in records:
